@@ -117,6 +117,107 @@ static async add_new(
       res.status(500).json({ message: "Failed to add new bill" });
     }
   }
+
+  static async getUpcomingBills(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      connectDb();
+
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 15;
+      const status = req.query.status as string || "";
+      const type = req.query.type as string || "";
+      const vendor = req.query.vendor as string || "";
+      const dueDateSort = req.query.dueDate === "asc" ? 1 : -1;
+
+      const now = new Date();
+
+      // Build the base match condition
+      const matchConditions: any = {
+        $or: [
+          { dueDate: { $gt: now }, status: { $in: ["pending", "paid"] } },
+          { dueDate: { $lt: now }, status: "overdue" }
+        ]
+      };
+
+      if (status) matchConditions.status = status;
+      if (type) matchConditions["category.name"] = type; // handled after lookup
+      if (vendor) matchConditions["vendor.name"] = vendor; // handled after lookup
+
+      const bills = await Bill.aggregate([
+        { $match: matchConditions },
+
+        // Lookup category name
+        {
+          $lookup: {
+            from: "billcategories",
+            localField: "category",
+            foreignField: "_id",
+            as: "category"
+          }
+        },
+        { $unwind: "$category" },
+
+        // Lookup vendor name
+        {
+          $lookup: {
+            from: "vendors",
+            localField: "vendor",
+            foreignField: "_id",
+            as: "vendor"
+          }
+        },
+        { $unwind: "$vendor" },
+
+        // Lookup payment method for paid bills
+        {
+          $lookup: {
+            from: "payments",
+            localField: "_id",
+            foreignField: "bill",
+            as: "payment"
+          }
+        },
+
+        // Transform to required output
+        {
+          $project: {
+            id: { $toString: "$_id" },
+            type: "$category.name",
+            vendor: "$vendor.name",
+            amount: 1,
+            status: 1,
+            paymentMethod: {
+              $cond: [
+                { $eq: ["$status", "paid"] },
+                {
+                  $ifNull: [
+                    { $arrayElemAt: ["$payment.method", 0] },
+                    "--"
+                  ]
+                },
+                "--"
+              ]
+            },
+            date: {
+              $dateToString: { format: "%Y-%m-%d", date: "$dueDate" }
+            },
+            timestamp: { $toLong: "$dueDate" }
+          }
+        },
+
+        { $sort: { timestamp: dueDateSort } },
+        { $skip: (page - 1) * limit },
+        { $limit: limit }
+      ]);
+
+      res.status(200).json(bills);
+    } catch (error) {
+      console.error("Error fetching upcoming bills:", error);
+      res.status(500).json({ message: "Failed to fetch upcoming bills" });
+    }
+  }
 }
+
+  
 
 export default BillController;
